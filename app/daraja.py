@@ -2,9 +2,8 @@
 import base64
 import time
 from datetime import datetime, timedelta, timezone
-
 import httpx
-
+import uuid
 
 SANDBOX_URL = "https://sandbox.safaricom.co.ke"
 EAT = timezone(timedelta(hours=3))
@@ -34,10 +33,7 @@ class DarajaClient:
         self._token: str | None = None
         self._expires_at = 0.0
 
-    async def _get_token(
-        self,
-        http: httpx.AsyncClient,
-    ) -> str:
+    async def _get_token(self, http: httpx.AsyncClient) -> str:
         # Reuse the token until a minute before it expires.
         if self._token and time.monotonic() < self._expires_at - 60:
             return self._token
@@ -64,3 +60,42 @@ class DarajaClient:
         self._expires_at = time.monotonic() + expires_in
 
         return token
+    
+    async def stk_push(self, phone_number: str, amount: int) -> dict:
+        if self.mock:
+            return {
+                "MerchantRequestID": f"MOCK-{uuid.uuid4().hex[:6].upper()}",
+                "CheckoutRequestID": f"ws_CO_MOCK_{uuid.uuid4().hex[:12].upper()}",
+                "ResponseCode": "0",
+                "ResponseDescription": "Success. Request accepted for processing",
+                "CustomerMessage": "Success. Request accepted for processing",
+            }
+
+        timestamp = make_timestamp()
+        body = {
+            "BusinessShortCode": self.shortcode,
+            "Password": build_password(self.shortcode, self.passkey, timestamp),
+            "Timestamp": timestamp,
+            "TransactionType": "CustomerPayBillOnline",
+            "Amount": amount,
+            "PartyA": phone_number,
+            "PartyB": self.shortcode,
+            "PhoneNumber": phone_number,
+            "CallBackURL": self.callback_url,
+            "AccountReference": "DocsDemo",
+            "TransactionDesc": "Payment",
+        }
+        async with httpx.AsyncClient(timeout=30) as http:
+            token = await self._get_token(http)
+            response = await http.post(
+                f"{SANDBOX_URL}/mpesa/stkpush/v1/processrequest",
+                json=body,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"errorMessage": response.text}
+        if response.status_code != 200 or data.get("ResponseCode") != "0":
+            raise DarajaError(data.get("errorMessage") or data.get("ResponseDescription") or str(data))
+        return data
